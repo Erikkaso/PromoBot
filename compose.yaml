@@ -1,0 +1,42 @@
+services:
+  app:
+    build: .
+    image: telegram-ofertas-bot:latest
+    restart: unless-stopped
+    init: true
+    environment:
+      TG_API_ID: ${TG_API_ID:?Configure TG_API_ID}
+      TG_API_HASH: ${TG_API_HASH:?Configure TG_API_HASH}
+      TG_BOT_TOKEN: ${TG_BOT_TOKEN:?Configure TG_BOT_TOKEN}
+      TG_USER_SESSION: ${TG_USER_SESSION:?Configure TG_USER_SESSION}
+      MAX_MEDIA_MB: ${MAX_MEDIA_MB:-15}
+      INITIAL_KEYWORDS: ${INITIAL_KEYWORDS:-[]}
+      INITIAL_CHAT_IDS: ${INITIAL_CHAT_IDS:-[]}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-telegram_ofertas}
+      MYSQL_USER: ${MYSQL_USER:-telegram_ofertas}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Configure MYSQL_PASSWORD}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-telegram_ofertas}
+      MYSQL_USER: ${MYSQL_USER:-telegram_ofertas}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?Configure MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Configure MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_PASSWORD\" mysql --protocol=TCP -h 127.0.0.1 -u \"$$MYSQL_USER\" \"$$MYSQL_DATABASE\" -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+volumes:
+  mysql_data:
