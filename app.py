@@ -104,6 +104,11 @@ async def main() -> None:
     max_media_bytes = int(os.getenv('MAX_MEDIA_MB', '15')) * 1024 * 1024
     keywords = json.loads(os.getenv('INITIAL_KEYWORDS', '[]'))
     chat_ids = json.loads(os.getenv('INITIAL_CHAT_IDS', '[]'))
+    allowed_user_ids = json.loads(os.getenv('TG_ALLOWED_USER_IDS', '[]'))
+    if not isinstance(allowed_user_ids, list) or any(
+        type(uid) is not int or not 0 < uid < 2 ** 63 for uid in allowed_user_ids
+    ):
+        raise ValueError('TG_ALLOWED_USER_IDS precisa ser um array JSON de IDs inteiros positivos.')
     if not isinstance(keywords, list) or any(not isinstance(k, str) for k in keywords):
         raise ValueError('INITIAL_KEYWORDS precisa ser um array JSON de frases.')
     if not isinstance(chat_ids, list) or any(type(c) is not int for c in chat_ids):
@@ -140,6 +145,7 @@ async def main() -> None:
         if user is None or user.bot:
             raise ValueError('TG_USER_SESSION deve ser da sua conta pessoal, não de um bot.')
         owner_id = user.id
+        authorized_users = {owner_id, *allowed_user_ids}
         log.info('Conta pessoal conectada: %s (ID %s)', user.first_name, owner_id)
 
         await bot_client.connect()
@@ -174,20 +180,25 @@ async def main() -> None:
             async with send_lock:
                 if store.notified(event.chat_id, msg.id):
                     return
-                try:
-                    await send_offer_copy(user_client, bot_client, owner_id, msg, max_media_bytes)
+                delivered = False
+                for recipient_id in sorted(authorized_users):
+                    try:
+                        await send_offer_copy(user_client, bot_client, recipient_id, msg, max_media_bytes)
+                        delivered = True
+                    except FloodWaitError as exc:
+                        log.warning('Telegram pediu pausa de %s segundos para destinatario %s',
+                                    exc.seconds, recipient_id)
+                    except Exception:
+                        log.exception('Falha ao avisar destinatario %s sobre msg %s', recipient_id, msg.id)
+                if delivered:
                     store.mark_notified(event.chat_id, msg.id)
                     log.info('ALERTA | %s | msg=%s | palavras=%s',
                              store.watched().get(event.chat_id), msg.id, ', '.join(found))
-                except FloodWaitError as exc:
-                    log.warning('Telegram pediu pausa de %s segundos: %s', exc.seconds, exc)
-                except Exception:
-                    log.exception('Falha ao avisar sobre msg %s (pode ser reenviada se houver novo evento)', msg.id)
 
         @bot_client.on(events.NewMessage(incoming=True))
         async def commands(event):
-            # Somente comandos privados da mesma conta que faz a leitura.
-            if not event.is_private or event.sender_id != owner_id:
+            # Os usuarios autorizados compartilham canais, filtros e alertas.
+            if not event.is_private or event.sender_id not in authorized_users:
                 return
             raw = (event.raw_text or '').strip()
             if not raw.startswith('/'):
@@ -199,7 +210,7 @@ async def main() -> None:
             try:
                 if cmd in ('/start', '/ajuda', '/help'):
                     answer = (
-                        'Monitor de ofertas ativo.\n\n'
+                        'Monitor de ofertas ativo. Configuracao compartilhada entre usuarios autorizados.\n\n'
                         '/add RTX 5060 - cadastrar frase\n'
                         '/remover RTX 5060 - remover frase\n'
                         '/lista - listar frases\n'
@@ -269,10 +280,10 @@ async def main() -> None:
                                   if found else 'Nenhuma palavra-chave corresponde a esse texto.')
                 else:
                     answer = 'Comando desconhecido. Envie /ajuda.'
-                await send_long_message(bot_client, owner_id, answer)
+                await send_long_message(bot_client, event.sender_id, answer)
             except Exception:
                 log.exception('Erro ao processar comando: %s', cmd)
-                await bot_client.send_message(owner_id, 'Erro ao executar comando. Veja o terminal.', parse_mode=None)
+                await bot_client.send_message(event.sender_id, 'Erro ao executar comando. Veja o terminal.', parse_mode=None)
 
         log.info('Monitor pronto: %s canal(is), %s palavra(s)-chave.',
                  len(store.watched()), len(store.keywords()))

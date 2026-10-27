@@ -65,6 +65,31 @@ docker run -d --name telegram-ofertas-bot --restart unless-stopped --init --env-
 
 Para `docker run --env-file`, escreva os valores sem aspas externas, como no `.env.example`. Não há porta HTTP para publicar. Sem Docker, configure `MYSQL_HOST` com o endereço do servidor e execute `python app.py`.
 
+## Compartilhar a instância
+
+A conta de `TG_USER_SESSION` continua lendo os canais. Para permitir que outras
+pessoas usem o mesmo bot, configure os IDs numéricos delas:
+
+```dotenv
+TG_ALLOWED_USER_IDS=[123456789,987654321]
+```
+
+No Secret Kubernetes, dentro de `stringData`, o valor precisa ser texto:
+
+```yaml
+  TG_ALLOWED_USER_IDS: "[123456789,987654321]"
+```
+
+Os números acima são exemplos. O dono da sessão permanece autorizado
+automaticamente; `[]` mantém o uso exclusivo pelo dono. Cada pessoa adicionada
+precisa abrir o bot e enviar `/start`. Todos os autorizados podem consultar e
+alterar os mesmos filtros/canais e recebem os mesmos alertas. Os canais
+continuam sendo os acessíveis pela conta de `TG_USER_SESSION`.
+
+Atualize a imagem e reinicie o Deployment depois de aplicar a configuração.
+Falha ao enviar para uma pessoa não impede o envio para as demais; entregas
+individuais que falharem não são recuperadas automaticamente.
+
 ## Comandos
 
 | Comando | Exemplo | Ação |
@@ -95,7 +120,7 @@ A frase é comparada ignorando maiúsculas/minúsculas, acentos e pontuação. P
 ## Segurança e limites
 
 - Proteja `.env`, `data/telegram.env` e `data/*.session`: a sessão permite acesso à sua conta.
-- O bot só atende mensagens privadas do usuário autenticado (o código detecta automaticamente o ID da conta).
+- O bot só atende mensagens privadas do dono e dos IDs configurados em `TG_ALLOWED_USER_IDS`.
 - O bot só consegue enviar mensagens depois que você abre a conversa e envia `/start`.
 - O MySQL mantém palavras-chave e grupos escolhidos após reiniciar a aplicação.
 - Se o bot perder conexão, mensagens podem deixar de ser capturadas; não existe recuperação de eventos perdidos nesta versão.
