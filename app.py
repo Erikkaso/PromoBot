@@ -1,6 +1,7 @@
 """Monitor simples: sua conta le canais; seu bot envia copias dos posts relevantes."""
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -14,9 +15,10 @@ from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import MemorySession, StringSession
+from telethon.tl.custom import Button
 
 import dedup
-from matching import matching_keywords
+from matching import matching_keywords, normalize
 from storage import Store
 
 BASE = Path(__file__).resolve().parent
@@ -66,6 +68,35 @@ def apply_header(header: str, text: str, entities):
         clone.offset += shift
         moved.append(clone)
     return prefix + text, (moved or None)
+
+
+def format_brl(value: float) -> str:
+    return 'R$ ' + f'{value:,.2f}'.replace(',', 'X').replace('.', ',').replace('X', '.')
+
+
+def phrase_id(phrase: str) -> str:
+    """Identificador curto para o callback do botao (limite de 64 bytes)."""
+    return hashlib.sha1(normalize(phrase).encode()).hexdigest()[:16]
+
+
+def describe_keyword(phrase: str, limit: float | None) -> str:
+    return phrase if limit is None else f'{phrase} (ate {format_brl(limit)})'
+
+
+LIST_PAGE_SIZE = 20
+
+
+def keyword_pages(limits: dict[str, float | None]):
+    """Paginas de (texto, botoes) da lista; um botao de preco por frase."""
+    items = list(limits.items())
+    for start in range(0, len(items), LIST_PAGE_SIZE):
+        chunk = items[start:start + LIST_PAGE_SIZE]
+        text = 'Palavras-chave (toque em uma para definir o preco maximo):' if start == 0 else '(continuacao)'
+        buttons = [[Button.inline(
+            ('💰 ' if limit is not None else '➕ ') + describe_keyword(phrase, limit)[:60],
+            data=f'lim:{phrase_id(phrase)}'.encode(),
+        )] for phrase, limit in chunk]
+        yield text, buttons
 
 
 def split_targets(arg: str) -> list[str]:
@@ -351,7 +382,9 @@ async def main() -> None:
             content = msg.raw_text or ''
             if not content:
                 return
-            found = matching_keywords(store.keywords(), content)
+            limits = store.keyword_limits()
+            price = dedup.offer_price(content)
+            found = matching_keywords(list(limits), content, limits, price)
             if not found:
                 return
             if store.notified(event.chat_id, msg.id):
@@ -375,14 +408,58 @@ async def main() -> None:
                 # ate o fim dela sao comparados juntos.
                 flush_task = asyncio.create_task(flush_pending())
 
+        # Usuario -> frase aguardando o valor maximo digitado apos tocar no botao.
+        awaiting_limit: dict[int, str] = {}
+
+        def phrase_by_id(key: str) -> str | None:
+            return next((p for p in store.keywords() if phrase_id(p) == key), None)
+
+        @bot_client.on(events.CallbackQuery(pattern=b'^lim:'))
+        async def limit_button(event):
+            if event.sender_id not in authorized_users:
+                await event.answer()
+                return
+            phrase = phrase_by_id(event.data.decode().partition(':')[2])
+            if phrase is None:
+                await event.answer('Palavra-chave nao existe mais. Use /lista.', alert=True)
+                return
+            awaiting_limit[event.sender_id] = phrase
+            current = store.keyword_limits().get(phrase)
+            await event.answer()
+            await bot_client.send_message(
+                event.sender_id,
+                f'Valor maximo para "{phrase}"'
+                + (f' (atual: {format_brl(current)})' if current is not None else ' (sem limite hoje)')
+                + '.\nResponda com o valor em R$, por exemplo 2000 ou 1.999,90.\n'
+                'Envie 0 para remover o limite ou /cancelar para sair.',
+                parse_mode=None,
+            )
+
         @bot_client.on(events.NewMessage(incoming=True))
         async def commands(event):
             # Os usuarios autorizados compartilham canais, filtros e alertas.
             if not event.is_private or event.sender_id not in authorized_users:
                 return
             raw = (event.raw_text or '').strip()
+            pending_phrase = awaiting_limit.get(event.sender_id)
+            if pending_phrase is not None and (not raw.startswith('/') or raw.casefold() == '/cancelar'):
+                if raw.casefold() == '/cancelar':
+                    awaiting_limit.pop(event.sender_id)
+                    answer = 'Cancelado.'
+                else:
+                    amount = dedup.parse_amount(raw)
+                    if amount is None:
+                        answer = 'Nao entendi o valor. Envie so o numero (ex.: 2000) ou /cancelar.'
+                    else:
+                        awaiting_limit.pop(event.sender_id)
+                        store.set_max_price(pending_phrase, amount or None)
+                        answer = (f'Limite de "{pending_phrase}": {format_brl(amount)}.' if amount
+                                  else f'Limite removido de "{pending_phrase}".')
+                await bot_client.send_message(event.sender_id, answer, parse_mode=None)
+                return
             if not raw.startswith('/'):
                 return
+            awaiting_limit.pop(event.sender_id, None)
             cmd, _, arg = raw.partition(' ')
             cmd = cmd.split('@')[0].casefold()
             arg = arg.strip()
@@ -391,7 +468,8 @@ async def main() -> None:
                 if cmd in ('/start', '/ajuda', '/help'):
                     answer = (
                         'Monitor de ofertas ativo. Configuracao compartilhada entre usuarios autorizados.\n\n'
-                        '/add RTX 5060 - cadastrar frase\n'
+                        '/add RTX 5060 | 2000 - cadastrar frase (opcional: preco maximo em R$)\n'
+                        '/preco RTX 5060 | 1800 - mudar o preco maximo (ou toque na frase em /lista)\n'
                         '/remover RTX 5060 - remover frase\n'
                         '/lista - listar frases\n'
                         '/grupos - listar seus grupos e canais\n'
@@ -410,15 +488,43 @@ async def main() -> None:
                     if not arg:
                         answer = 'Uso: /add RTX 5060'
                     else:
-                        new = store.add_keyword(arg)
-                        answer = (f'Palavra-chave cadastrada: {arg}' if new
-                                  else 'Essa palavra-chave ja existe.')
+                        phrase, limit = dedup.split_limit(arg)
+                        new = store.add_keyword(phrase, limit)
+                        suffix = f' (preco maximo {format_brl(limit)})' if limit is not None else ''
+                        if new:
+                            answer = f'Palavra-chave cadastrada: {phrase}{suffix}'
+                        elif limit is not None:
+                            answer = f'Essa palavra-chave ja existia; limite atualizado{suffix}.'
+                        else:
+                            answer = 'Essa palavra-chave ja existe.'
+                elif cmd == '/preco':
+                    phrase, limit = dedup.split_limit(arg)
+                    if limit is None and phrase.casefold().endswith(' sem'):
+                        phrase = phrase[:-4].strip()
+                        removing = True
+                    else:
+                        removing = False
+                    if not arg or (limit is None and not removing):
+                        answer = ('Uso: /preco RTX 5060 | 2000  (ate R$ 2.000)\n'
+                                  '/preco RTX 5060 sem  (remove o limite)\n'
+                                  'Ou toque na frase em /lista.')
+                    elif not store.set_max_price(phrase, limit):
+                        answer = 'Palavra-chave nao encontrada. Veja /lista.'
+                    else:
+                        answer = (f'Limite removido de "{phrase}".' if removing
+                                  else f'Limite de "{phrase}": {format_brl(limit)}.')
                 elif cmd in ('/remover', '/remove'):
                     answer = ('Palavra-chave removida.' if store.remove_keyword(arg)
                               else 'Palavra-chave nao encontrada.') if arg else 'Uso: /remover RTX 5060'
                 elif cmd in ('/lista', '/list'):
-                    items = store.keywords()
-                    answer = 'Palavras-chave:\n' + '\n'.join('• ' + i for i in items) if items else 'Nenhuma palavra-chave. Use /add produto.'
+                    limits = store.keyword_limits()
+                    if not limits:
+                        answer = 'Nenhuma palavra-chave. Use /add produto.'
+                    else:
+                        for text, buttons in keyword_pages(limits):
+                            await bot_client.send_message(event.sender_id, text, buttons=buttons,
+                                                          parse_mode=None)
+                        return
                 elif cmd in ('/grupos', '/groups'):
                     dialogs = [d async for d in user_client.iter_dialogs() if d.is_group or d.is_channel]
                     watched = store.watched()
@@ -494,8 +600,9 @@ async def main() -> None:
                     if not arg:
                         answer = 'Uso: /teste Notebook gamer Ryzen 7 R$ 3000'
                     else:
-                        found = matching_keywords(store.keywords(), arg)
+                        limits = store.keyword_limits()
                         price = dedup.offer_price(arg)
+                        found = matching_keywords(list(limits), arg, limits, price)
                         answer = ('Correspondencia encontrada: ' + ', '.join(found)
                                   if found else 'Nenhuma palavra-chave corresponde a esse texto.')
                         if price is not None:

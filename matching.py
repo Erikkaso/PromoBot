@@ -16,5 +16,16 @@ def matches(keyword: str, message: str) -> bool:
     return bool(key and text and f' {key} ' in f' {text} ')
 
 
-def matching_keywords(keywords: list[str], message: str) -> list[str]:
-    return [keyword for keyword in keywords if matches(keyword, message)]
+def matching_keywords(keywords: list[str], message: str,
+                      limits: dict[str, float | None] | None = None,
+                      price: float | None = None) -> list[str]:
+    """Frases presentes na mensagem e cujo valor maximo (se houver) comporta o preco.
+
+    Anuncio sem preco identificavel passa pelo filtro: nao da pra comparar, e
+    perder uma oferta custa mais que receber uma a mais.
+    """
+    found = [keyword for keyword in keywords if matches(keyword, message)]
+    if not limits or price is None:
+        return found
+    return [keyword for keyword in found
+            if limits.get(keyword) is None or price <= limits[keyword]]

@@ -29,6 +29,13 @@ class Store:
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
                 ):
                     cur.execute(statement)
+                # Bancos criados antes do filtro de preco nao tem a coluna.
+                cur.execute(
+                    'SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() '
+                    "AND TABLE_NAME='keywords' AND COLUMN_NAME='max_price'"
+                )
+                if not cur.fetchone():
+                    cur.execute('ALTER TABLE keywords ADD COLUMN max_price DECIMAL(12,2) NULL')
         except Exception:
             self.con.close()
             raise
@@ -46,15 +53,34 @@ class Store:
         except pymysql.Error:
             self.con.connect()
 
-    def add_keyword(self, phrase: str) -> bool:
+    def add_keyword(self, phrase: str, max_price: float | None = None) -> bool:
+        """Cadastra a frase; com max_price, tambem define (ou troca) o limite."""
         phrase = phrase.strip()
         norm = normalize(phrase)
         if not norm or len(phrase) > 120 or len(norm) > 768:
             raise ValueError('A palavra-chave precisa ter entre 1 e 120 caracteres (normalização até 768).')
-        return self._execute(
-            'INSERT INTO keywords (phrase, normalized) VALUES (%s, %s) '
-            'ON DUPLICATE KEY UPDATE normalized=keywords.normalized', (phrase, norm),
-        ) > 0
+        created = self._execute(
+            'INSERT INTO keywords (phrase, normalized, max_price) VALUES (%s, %s, %s) '
+            'ON DUPLICATE KEY UPDATE normalized=keywords.normalized', (phrase, norm, max_price),
+        ) == 1
+        if not created and max_price is not None:
+            self.set_max_price(phrase, max_price)
+        return created
+
+    def set_max_price(self, phrase: str, max_price: float | None) -> bool:
+        """Define o valor maximo em R$ da frase; None remove o limite."""
+        norm = normalize(phrase)
+        return bool(self._execute(
+            'SELECT 1 FROM keywords WHERE normalized=%s', (norm,), fetch=True,
+        )) and self._execute(
+            'UPDATE keywords SET max_price=%s WHERE normalized=%s', (max_price, norm),
+        ) >= 0
+
+    def keyword_limits(self) -> dict[str, float | None]:
+        """Frase -> valor maximo em R$ (None quando sem limite)."""
+        return {phrase: (float(limit) if limit is not None else None)
+                for phrase, limit in self._execute(
+                    'SELECT phrase, max_price FROM keywords ORDER BY phrase', fetch=True)}
 
     def remove_keyword(self, phrase: str) -> bool:
         return self._execute('DELETE FROM keywords WHERE normalized=%s', (normalize(phrase),)) > 0

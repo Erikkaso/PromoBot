@@ -6,6 +6,7 @@ de afiliado proprios. As funcoes abaixo comparam o conteudo util do anuncio
 que apenas a publicacao mais barata de cada grupo semelhante seja entregue.
 """
 import re
+import unicodedata
 from typing import Sequence
 
 from matching import normalize
@@ -78,6 +79,39 @@ def _to_float(raw: str) -> float | None:
         return float(f'{digits}.{decimals}' if decimals else digits)
     except ValueError:
         return None
+
+
+_LIMIT_RE = re.compile(
+    r'^(?P<phrase>.*?)\s*(?:\||<=|\b(?:ate|maximo|max|limite)\b)\s*(?:R\$)?\s*(?P<amount>\d[\d.,]*)\s*$',
+    re.IGNORECASE,
+)
+
+
+def parse_amount(raw: str) -> float | None:
+    """Valor digitado pelo usuario ('2000', 'R$ 1.999,90'); None se invalido."""
+    match = re.fullmatch(r'\s*(?:R\$)?\s*(\d[\d.,]*)\s*', raw or '', re.IGNORECASE)
+    return _to_float(match.group(1)) if match else None
+
+
+def split_limit(arg: str) -> tuple[str, float | None]:
+    """'RTX 5060 | 2000' ou 'RTX 5060 ate R$ 2.000' -> ('RTX 5060', 2000.0).
+
+    Sem limite informado devolve o texto inteiro como frase.
+    """
+    match = _LIMIT_RE.match(normalize_accents(arg.strip()))
+    if not match or not match.group('phrase').strip():
+        return arg.strip(), None
+    amount = _to_float(match.group('amount'))
+    if amount is None:
+        return arg.strip(), None
+    # A frase vem do texto original, so cortando o trecho do limite.
+    return arg.strip()[:match.end('phrase')].strip(), amount
+
+
+def normalize_accents(text: str) -> str:
+    """Remove acentos preservando posicoes (so para localizar 'ate'/'maximo')."""
+    return ''.join(ch if len(unicodedata.normalize('NFD', ch)) == 1
+                   else unicodedata.normalize('NFD', ch)[0] for ch in text)
 
 
 def extract_prices(text: str) -> list[float]:

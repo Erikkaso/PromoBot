@@ -99,9 +99,10 @@ individuais que falharem não são recuperadas automaticamente.
 | `/monitorar <ids…>` | `/monitorar -1001079131412 -1009876543210 @canal` | Começa a monitorar vários de uma vez |
 | `/monitorar todos` | `/monitorar todos` | Monitora todos os grupos/canais da conta |
 | `/parar <ids…>` | `/parar -1001079131412 -1009876543210` | Para de monitorar |
-| `/add <frase>` | `/add rtx 5060` | Adiciona palavra-chave/frase |
+| `/add <frase> [\| valor]` | `/add rtx 5060 \| 2000` | Adiciona palavra-chave/frase, com preço máximo opcional em R$ (`até 2000` também vale) |
+| `/preco <frase> \| <valor>` | `/preco rtx 5060 \| 1800` | Define ou troca o preço máximo; `/preco rtx 5060 sem` remove |
 | `/remover <frase>` | `/remover rtx 5060` | Remove frase |
-| `/lista` | `/lista` | Lista palavras-chave |
+| `/lista` | `/lista` | Lista as palavras-chave com um botão por frase (💰 tem limite, ➕ sem limite): toque, envie o valor e pronto; `0` remove o limite |
 | `/teste <texto>` | `/teste RTX 5060 R$ 2000` | Testa correspondência e mostra o preço identificado |
 | `/similar <a> \|\| <b>` | `/similar RTX 5060 R$ 2299 \|\| Asus RTX 5060 R$ 2149` | Mostra se dois anúncios seriam agrupados |
 | `/status` | `/status` | Exibe números de grupos/frases |
@@ -109,6 +110,16 @@ individuais que falharem não são recuperadas automaticamente.
 ## Como é feita a comparação?
 
 A frase é comparada ignorando maiúsculas/minúsculas, acentos e pontuação. Por exemplo, `/add rtx 5060` corresponde a `RTX-5060 por R$ 1999`, mas não a `RTX 5060Ti`.
+
+## Preço máximo por palavra-chave
+
+Cada frase pode ter um valor máximo em R$. O alerta só sai se o preço lido no
+anúncio for **menor ou igual** ao limite; acima disso a mensagem é ignorada. O
+preço é o mesmo usado na deduplicação (valor final, sem parcelas). Anúncio em
+que não dá para identificar nenhum preço **passa**, porque não há como comparar
+e perder uma oferta custa mais que receber uma a mais. Frases sem limite não
+filtram nada. Bancos MySQL existentes ganham a coluna `max_price` sozinhos na
+próxima inicialização.
 
 ## Anúncios repetidos em vários grupos
 

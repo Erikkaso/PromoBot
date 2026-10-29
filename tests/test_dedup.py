@@ -1,7 +1,8 @@
 import unittest
 
 from dedup import (
-    cluster_offers, codes, extract_prices, offer_price, product_ids, same_offer, similarity, specs,
+    cluster_offers, codes, extract_prices, offer_price, parse_amount, product_ids, same_offer,
+    similarity, split_limit, specs,
 )
 
 ANUNCIO_A = (
@@ -72,6 +73,28 @@ class SemelhancaTests(unittest.TestCase):
                        base + ' por R$ 1.399 https://lg.com/b?tag=dois'),
             0.9,
         )
+
+
+class LimiteTests(unittest.TestCase):
+    def test_barra_vertical(self):
+        self.assertEqual(split_limit('RTX 5060 | 2000'), ('RTX 5060', 2000.0))
+
+    def test_ate_com_acento_e_moeda(self):
+        self.assertEqual(split_limit('RTX 5060 até R$ 2.000,50'), ('RTX 5060', 2000.5))
+
+    def test_sem_limite_mantem_frase(self):
+        self.assertEqual(split_limit('Notebook gamer'), ('Notebook gamer', None))
+
+    def test_numero_da_frase_nao_e_limite(self):
+        self.assertEqual(split_limit('Chocolate 500'), ('Chocolate 500', None))
+
+    def test_valor_invalido(self):
+        self.assertEqual(split_limit('RTX 5060 | abc'), ('RTX 5060 | abc', None))
+
+    def test_parse_amount(self):
+        self.assertEqual(parse_amount('R$ 1.999,90'), 1999.9)
+        self.assertEqual(parse_amount('0'), 0.0)
+        self.assertIsNone(parse_amount('abc'))
 
 
 class VariacaoTests(unittest.TestCase):
