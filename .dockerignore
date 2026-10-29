@@ -2,6 +2,7 @@
 !Dockerfile
 !requirements.txt
 !app.py
+!dedup.py
 !matching.py
 !storage.py
 !generate_session.py
