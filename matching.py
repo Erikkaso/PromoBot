@@ -16,6 +16,10 @@ def matches(keyword: str, message: str) -> bool:
     return bool(key and text and f' {key} ' in f' {text} ')
 
 
+def blocked_words(blocked: list[str], message: str) -> list[str]:
+    """Palavras proibidas presentes na mensagem (mesma regra de frase completa)."""
+    return [word for word in blocked if matches(word, message)]
+
 def matching_keywords(keywords: list[str], message: str,
                       limits: dict[str, float | None] | None = None,
                       price: float | None = None) -> list[str]:

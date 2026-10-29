@@ -1,5 +1,5 @@
 import unittest
-from matching import matches, matching_keywords
+from matching import blocked_words, matches, matching_keywords
 
 
 class MatchingTests(unittest.TestCase):
@@ -38,6 +38,20 @@ class LimiteDePrecoTests(unittest.TestCase):
 
     def test_anuncio_sem_preco_passa(self):
         self.assertEqual(self._found('RTX 5060 em oferta', None), ['rtx 5060'])
+
+
+class ProibidasTests(unittest.TestCase):
+    def test_palavra_proibida_detectada(self):
+        self.assertEqual(blocked_words(['usado'], 'Notebook USADO em otimo estado'), ['usado'])
+
+    def test_sem_proibida(self):
+        self.assertEqual(blocked_words(['usado'], 'Notebook novo lacrado'), [])
+
+    def test_nao_pega_pedaco_de_outra_palavra(self):
+        self.assertEqual(blocked_words(['usado'], 'Pagamento nao usadouro'), [])
+
+    def test_frase_proibida_com_acento(self):
+        self.assertEqual(blocked_words(['sem garantia'], 'Vendo SEM GARANTÍA!'), ['sem garantia'])
 
 
 if __name__ == '__main__':

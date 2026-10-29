@@ -102,6 +102,9 @@ individuais que falharem não são recuperadas automaticamente.
 | `/add <frase> [\| valor]` | `/add rtx 5060 \| 2000` | Adiciona palavra-chave/frase, com preço máximo opcional em R$ (`até 2000` também vale) |
 | `/preco <frase> \| <valor>` | `/preco rtx 5060 \| 1800` | Define ou troca o preço máximo; `/preco rtx 5060 sem` remove |
 | `/remover <frase>` | `/remover rtx 5060` | Remove frase |
+| `/proibir <palavras>` | `/proibir usado, seminovo` | Ignora anúncios que contenham a palavra/frase, mesmo que combinem com uma palavra-chave |
+| `/liberar <palavras>` | `/liberar usado` | Remove da lista de proibidas |
+| `/proibidos` | `/proibidos` | Lista as palavras proibidas |
 | `/lista` | `/lista` | Lista as palavras-chave com um botão por frase (💰 tem limite, ➕ sem limite): toque, envie o valor e pronto; `0` remove o limite |
 | `/teste <texto>` | `/teste RTX 5060 R$ 2000` | Testa correspondência e mostra o preço identificado |
 | `/similar <a> \|\| <b>` | `/similar RTX 5060 R$ 2299 \|\| Asus RTX 5060 R$ 2149` | Mostra se dois anúncios seriam agrupados |
@@ -110,6 +113,15 @@ individuais que falharem não são recuperadas automaticamente.
 ## Como é feita a comparação?
 
 A frase é comparada ignorando maiúsculas/minúsculas, acentos e pontuação. Por exemplo, `/add rtx 5060` corresponde a `RTX-5060 por R$ 1999`, mas não a `RTX 5060Ti`.
+
+## Palavras proibidas
+
+`/proibir usado, seminovo` faz o bot ignorar qualquer anúncio que contenha uma
+dessas palavras ou frases, mesmo que combine com uma palavra-chave. A regra de
+comparação é a mesma das palavras-chave (sem diferenciar maiúsculas, acentos ou
+pontuação, e só palavra inteira: `usado` não pega `usadouro`). O `/teste`
+avisa quando um texto seria bloqueado. A lista fica no MySQL (tabela
+`blocked_words`, criada sozinha).
 
 ## Preço máximo por palavra-chave
 
@@ -130,7 +142,15 @@ compara o lote e entrega **um alerta por anúncio**, escolhendo o de **menor
 preço em R$**. Empate ou anúncio sem preço: vale o primeiro que chegou. Os
 descartados ficam registrados como notificados e não voltam.
 
-A comparação usa só o conteúdo do produto: links e valores são removidos antes,
+Além do lote, cada anúncio entregue fica na memória por `DEDUP_HISTORY_SECONDS`
+(300 por padrão). Se o mesmo anúncio aparecer depois, fora da janela de 5s, ele é
+descartado, a não ser que venha **mais barato** que o já enviado. O histórico é
+perdido ao reiniciar. `DEDUP_HISTORY_SECONDS=0` desliga essa checagem.
+
+A comparação usa só o conteúdo do produto, **sem artigos, preposições e
+pronomes** (`de`, `da`, `em`, `no`, `para`…) e sem palavras de propaganda — só
+contam nomes, marcas, modelos e medidas, e as que têm número pesam três vezes
+mais que uma palavra comum. `4L` e `4 litros` valem o mesmo: links e valores são removidos antes,
 porque mudam de canal para canal. Dois anúncios são considerados o mesmo quando:
 
 - os links apontam para o **mesmo código de produto** (Amazon `/dp/`, Mercado

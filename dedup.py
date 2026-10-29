@@ -7,18 +7,30 @@ que apenas a publicacao mais barata de cada grupo semelhante seja entregue.
 """
 import re
 import unicodedata
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 from matching import normalize
 
 DEFAULT_WINDOW_SECONDS = 5.0
 DEFAULT_SIMILARITY = 0.65
+# Por quanto tempo um anuncio ja entregue continua barrando repeticoes dele.
+DEFAULT_HISTORY_SECONDS = 300.0
 
 # Palavras de propaganda e conectores que aparecem em quase todo anuncio e por
 # isso nao ajudam a distinguir um produto do outro.
-STOPWORDS = frozenset('''
-    ao as da das de do dos eh em er la lo me na nao nas no nos os ou pq se so
-    ta te um vc
+# Artigos, preposicoes, conjuncoes e pronomes: nunca dizem qual e o produto.
+GRAMMAR_WORDS = frozenset('''
+    a o as os um uma uns umas ao aos de da do das dos dum duma em no na nos nas
+    num numa por pelo pela pelos pelas para pra com sem sob sobre entre ate
+    desde e ou mas nem que se como quando onde porque pq mais menos muito muita
+    muitos muitas pouco pouca tambem so ja ainda la ali aqui cá ca eh er
+    eu tu ele ela eles elas voce voces vc nos me te lhe meu minha seu sua
+    nosso nossa este esta estes estas esse essa esses essas isto isso aquele
+    aquela aquilo ser sao foi vai vem tem ter ta
+'''.split())
+
+# Palavras de propaganda que aparecem em quase todo anuncio.
+AD_WORDS = frozenset('''
     aproveite aqui acesse acesso agora apenas ate baixo barato boleto bom cada
     caiu cartao clique com como compra comprar compre confira conferir cupom
     cupons desconto descontos direto dia dias esse esta este eles ela ele emb
@@ -28,8 +40,10 @@ STOPWORDS = frozenset('''
     parcelas pelo pela pix pouco preco precos primeira pro produto produtos
     promo promocao promocoes que quem rapido real reais sem sera seu sua super
     tem toda todo todos uma umas uns unidade unidades use usar valor valores
-    vai vem ver veja vendido vendas vista voce
+    ver veja vendido vendas vista
 '''.split())
+
+STOPWORDS = GRAMMAR_WORDS | AD_WORDS
 
 _URL_RE = re.compile(
     r'https?://\S+|\b(?:www\.)?[\w-]+\.(?:com|br|net|org|me|io|co|shop|store)\b\S*',
@@ -159,9 +173,14 @@ def product_ids(text: str) -> set[str]:
 
 
 def clean_text(text: str) -> str:
-    """Texto normalizado sem links nem precos, que variam entre os canais."""
+    """Texto normalizado sem links nem precos, que variam entre os canais.
+
+    Numero e unidade viram um token so ('4 litros' e '4L' -> '4l'), para que
+    escritas diferentes da mesma medida se encontrem.
+    """
     without_links = _URL_RE.sub(' ', text or '')
-    return normalize(_PRICE_RE.sub(' ', without_links))
+    plain = normalize(_PRICE_RE.sub(' ', without_links))
+    return _SPEC_RE.sub(lambda m: m.group(1) + _UNIT_ALIASES.get(m.group(2), m.group(2)), plain)
 
 
 def tokens(text: str) -> set[str]:
@@ -204,45 +223,66 @@ def similarity(first: str, second: str) -> float:
     return token_similarity(tokens(first), tokens(second))
 
 
+def _weight(word: str) -> int:
+    """Marca, modelo e medida (tem digito) identificam melhor que palavra comum."""
+    return 3 if any(ch.isdigit() for ch in word) else 1
+
+
+def _mass(words) -> int:
+    return sum(_weight(word) for word in words)
+
+
 def token_similarity(first: set[str], second: set[str]) -> float:
     if not first or not second:
         return 0.0
-    common = len(first & second)
-    jaccard = common / len(first | second)
+    common = _mass(first & second)
+    jaccard = common / _mass(first | second)
     # Contencao cobre o caso de um canal repetir o anuncio com texto bem maior.
-    containment = common / min(len(first), len(second))
+    containment = common / min(_mass(first), _mass(second))
     return (jaccard + containment) / 2
 
 
-def same_offer(first: str, second: str, threshold: float = DEFAULT_SIMILARITY) -> bool:
-    return _same_offer(_describe(first), _describe(second), threshold)
+class Fingerprint(NamedTuple):
+    """Resumo comparavel de um anuncio: nomes, codigos de link, medidas e modelos."""
+    tokens: frozenset
+    ids: frozenset
+    specs: dict
+    codes: frozenset
 
 
-def _describe(text: str):
-    words = tokens(text)
-    return words, product_ids(text), specs(text), codes(text)
+def fingerprint(text: str) -> Fingerprint:
+    return Fingerprint(frozenset(tokens(text)), frozenset(product_ids(text)),
+                       specs(text), frozenset(codes(text)))
 
 
-def _same_offer(first, second, threshold) -> bool:
-    (tokens_a, ids_a, specs_a, codes_a), (tokens_b, ids_b, specs_b, codes_b) = first, second
-    if ids_a and ids_b:
+def same_fingerprint(first: Fingerprint, second: Fingerprint,
+                     threshold: float = DEFAULT_SIMILARITY) -> bool:
+    if first.ids and second.ids:
         # Codigos de produto no link sao decisivos nos dois sentidos.
-        return bool(ids_a & ids_b)
+        return bool(first.ids & second.ids)
     # Na duvida preferimos entregar duas vezes a esconder uma oferta diferente.
-    if conflicting_specs(specs_a, specs_b) or conflicting_codes(codes_a, codes_b):
+    if conflicting_specs(first.specs, second.specs) or conflicting_codes(first.codes, second.codes):
         return False
-    return token_similarity(tokens_a, tokens_b) >= threshold
+    return token_similarity(first.tokens, second.tokens) >= threshold
 
 
-def cluster_offers(texts: Sequence[str], threshold: float = DEFAULT_SIMILARITY) -> list[list[int]]:
+def same_offer(first: str, second: str, threshold: float = DEFAULT_SIMILARITY) -> bool:
+    return same_fingerprint(fingerprint(first), fingerprint(second), threshold)
+
+
+def cluster_fingerprints(prints: Sequence[Fingerprint],
+                         threshold: float = DEFAULT_SIMILARITY) -> list[list[int]]:
     """Agrupa indices de anuncios equivalentes, preservando a ordem de chegada."""
-    parsed = [_describe(text) for text in texts]
     clusters: list[list[int]] = []
-    for index, described in enumerate(parsed):
+    for index, described in enumerate(prints):
         for cluster in clusters:
-            if any(_same_offer(described, parsed[other], threshold) for other in cluster):
+            if any(same_fingerprint(described, prints[other], threshold) for other in cluster):
                 cluster.append(index)
                 break
         else:
             clusters.append([index])
     return clusters
+
+
+def cluster_offers(texts: Sequence[str], threshold: float = DEFAULT_SIMILARITY) -> list[list[int]]:
+    return cluster_fingerprints([fingerprint(text) for text in texts], threshold)

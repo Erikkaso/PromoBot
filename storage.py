@@ -17,6 +17,10 @@ class Store:
                         phrase VARCHAR(120) NOT NULL,
                         normalized VARCHAR(768) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
+                    '''CREATE TABLE IF NOT EXISTS blocked_words (
+                        phrase VARCHAR(120) NOT NULL,
+                        normalized VARCHAR(768) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin PRIMARY KEY
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''',
                     '''CREATE TABLE IF NOT EXISTS watched_chats (
                         chat_id BIGINT PRIMARY KEY,
                         title TEXT NOT NULL
@@ -87,6 +91,23 @@ class Store:
 
     def keywords(self) -> list[str]:
         return [row[0] for row in self._execute('SELECT phrase FROM keywords ORDER BY phrase', fetch=True)]
+
+    def block_word(self, phrase: str) -> bool:
+        """Anuncios que contenham a frase sao ignorados. False se ja existia."""
+        phrase = phrase.strip()
+        norm = normalize(phrase)
+        if not norm or len(phrase) > 120 or len(norm) > 768:
+            raise ValueError('A palavra proibida precisa ter entre 1 e 120 caracteres.')
+        return self._execute(
+            'INSERT INTO blocked_words (phrase, normalized) VALUES (%s, %s) '
+            'ON DUPLICATE KEY UPDATE normalized=blocked_words.normalized', (phrase, norm),
+        ) == 1
+
+    def unblock_word(self, phrase: str) -> bool:
+        return self._execute('DELETE FROM blocked_words WHERE normalized=%s', (normalize(phrase),)) > 0
+
+    def blocked(self) -> list[str]:
+        return [row[0] for row in self._execute('SELECT phrase FROM blocked_words ORDER BY phrase', fetch=True)]
 
     def watch(self, chat_id: int, title: str) -> None:
         self._execute(

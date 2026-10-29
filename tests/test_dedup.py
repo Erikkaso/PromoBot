@@ -1,7 +1,7 @@
 import unittest
 
 from dedup import (
-    cluster_offers, codes, extract_prices, offer_price, parse_amount, product_ids, same_offer,
+    cluster_offers, codes, fingerprint, same_fingerprint, tokens, extract_prices, offer_price, parse_amount, product_ids, same_offer,
     similarity, split_limit, specs,
 )
 
@@ -124,6 +124,32 @@ class VariacaoTests(unittest.TestCase):
         self.assertTrue(same_offer(
             'Notebook Dell Inspiron 15 i5 8GB 256GB R$ 2.799',
             'Notebook Dell Inspiron 15 3520 Core i5 8GB RAM 256GB SSD Windows 11 R$ 2.699'))
+
+
+class ArtigosTests(unittest.TestCase):
+    """Artigos e preposicoes nao contam: so nomes de produto, marca e modelo."""
+
+    def test_artigos_fora_dos_tokens(self):
+        self.assertEqual(tokens('Cafeteira da Nespresso em promoção no Mercado'),
+                         {'cafeteira', 'nespresso', 'mercado'})
+
+    def test_so_artigos_diferentes_e_o_mesmo_anuncio(self):
+        self.assertTrue(same_offer('Cafeteira da Nespresso Inissia preta',
+                                   'Nespresso Inissia cafeteira, na cor preta'))
+
+    def test_unidade_colada_ou_separada(self):
+        self.assertEqual(tokens('Air Fryer 4L'), tokens('Air Fryer 4 litros'))
+        self.assertTrue(same_offer('Air Fryer Mondial 4L por R$ 249',
+                                   'Fritadeira Mondial Air Fryer 4 litros R$ 239,90'))
+
+    def test_mesma_marca_outro_produto_nao_agrupa(self):
+        self.assertFalse(same_offer('Camiseta de algodão da Nike em promoção',
+                                    'Tênis de corrida da Nike em promoção'))
+
+    def test_fingerprint_reutilizavel(self):
+        a = fingerprint('SSD Kingston NV3 1TB R$ 349')
+        b = fingerprint('Kingston NV3 SSD de 1TB por R$ 339')
+        self.assertTrue(same_fingerprint(a, b))
 
 
 class AgrupamentoTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 """Monitor simples: sua conta le canais; seu bot envia copias dos posts relevantes."""
 import asyncio
+import collections
 import copy
 import hashlib
 import json
@@ -8,6 +9,7 @@ import os
 import re
 import signal
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from telethon.sessions import MemorySession, StringSession
 from telethon.tl.custom import Button
 
 import dedup
-from matching import matching_keywords, normalize
+from matching import blocked_words, matching_keywords, normalize
 from storage import Store
 
 BASE = Path(__file__).resolve().parent
@@ -29,6 +31,8 @@ log = logging.getLogger('monitor')
 
 # Limite de seguranca do lote de deduplicacao, caso um canal despeje muitos posts.
 MAX_PENDING_OFFERS = 200
+# Quantos anuncios entregues ficam na memoria para barrar repeticoes tardias.
+MAX_HISTORY_OFFERS = 50
 
 
 def env_required(name: str) -> str:
@@ -166,6 +170,16 @@ class PendingOffer:
     message: object
     text: str
     price: float | None = None
+    prints: object = None
+
+
+@dataclass
+class SentOffer:
+    """Anuncio ja entregue; serve para barrar o mesmo anuncio chegando depois."""
+    at: float
+    prints: object
+    price: float | None
+    title: str
 
 
 async def send_long_message(client, dest: int, text: str) -> None:
@@ -250,6 +264,8 @@ async def main() -> None:
                              minimum=0.0, maximum=120.0)
     dedup_similarity = env_float('DEDUP_SIMILARITY', dedup.DEFAULT_SIMILARITY,
                                  minimum=0.0, maximum=1.0)
+    history_seconds = env_float('DEDUP_HISTORY_SECONDS', dedup.DEFAULT_HISTORY_SECONDS,
+                                minimum=0.0, maximum=86400.0)
     show_source = os.getenv('SHOW_SOURCE', '1').strip().casefold() not in ('0', 'false', 'nao', 'no')
     keywords = json.loads(os.getenv('INITIAL_KEYWORDS', '[]'))
     chat_ids = json.loads(os.getenv('INITIAL_CHAT_IDS', '[]'))
@@ -324,7 +340,7 @@ async def main() -> None:
                            f'\n{len(duplicates)} anuncios iguais ignorados em: {others}')
             return header
 
-        async def deliver(offer: PendingOffer, duplicates: list[PendingOffer]) -> None:
+        async def deliver(offer: PendingOffer, duplicates: list[PendingOffer]) -> bool:
             header = source_header(offer, duplicates)
             delivered = False
             for recipient_id in sorted(authorized_users):
@@ -339,12 +355,29 @@ async def main() -> None:
                     log.exception('Falha ao avisar destinatario %s sobre msg %s',
                                   recipient_id, offer.message.id)
             if not delivered:
-                return
+                return False
             # Os semelhantes descartados tambem ficam marcados para nunca reaparecerem.
             for sent in (offer, *duplicates):
                 store.mark_notified(sent.chat_id, sent.message.id)
             log.info('ALERTA | %s | msg=%s | preco=%s | duplicados=%s',
                      offer.title, offer.message.id, offer.price, len(duplicates))
+            return True
+
+        recent: collections.deque[SentOffer] = collections.deque(maxlen=MAX_HISTORY_OFFERS)
+
+        def already_sent(offer: PendingOffer) -> SentOffer | None:
+            """Entregue ha pouco e sem preco melhor agora -> repeticao a descartar."""
+            now = time.monotonic()
+            while recent and now - recent[0].at > history_seconds:
+                recent.popleft()
+            for sent in reversed(recent):
+                if not dedup.same_fingerprint(offer.prints, sent.prints, dedup_similarity):
+                    continue
+                cheaper = (offer.price is not None and sent.price is not None
+                           and offer.price < sent.price)
+                # Mesmo anuncio, so passa de novo se vier mais barato que o enviado.
+                return None if cheaper else sent
+            return None
 
         async def flush_pending() -> None:
             nonlocal flush_task
@@ -354,11 +387,20 @@ async def main() -> None:
                     batch = list(pending)
                     pending.clear()
                     flush_task = None
-                    for group in dedup.cluster_offers([o.text for o in batch], dedup_similarity):
+                    for group in dedup.cluster_fingerprints([o.prints for o in batch], dedup_similarity):
                         offers = [batch[index] for index in group]
                         # Menor preco vence; sem preco ou empate, o primeiro que chegou.
                         winner = min(offers, key=lambda o: (o.price is None, o.price or 0.0))
-                        await deliver(winner, [o for o in offers if o is not winner])
+                        previous = already_sent(winner)
+                        if previous is not None:
+                            for dropped in offers:
+                                store.mark_notified(dropped.chat_id, dropped.message.id)
+                            log.info('REPETIDO | %s | msg=%s | ja enviado de %s',
+                                     winner.title, winner.message.id, previous.title)
+                            continue
+                        if await deliver(winner, [o for o in offers if o is not winner]):
+                            recent.append(SentOffer(time.monotonic(), winner.prints,
+                                                    winner.price, winner.title))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -382,6 +424,11 @@ async def main() -> None:
             content = msg.raw_text or ''
             if not content:
                 return
+            banned = blocked_words(store.blocked(), content)
+            if banned:
+                log.info('BLOQUEADO | %s | msg=%s | proibido=%s', watched[event.chat_id],
+                         msg.id, ', '.join(banned))
+                return
             limits = store.keyword_limits()
             price = dedup.offer_price(content)
             found = matching_keywords(list(limits), content, limits, price)
@@ -396,11 +443,11 @@ async def main() -> None:
                             MAX_PENDING_OFFERS, msg.id)
                 async with send_lock:
                     await deliver(PendingOffer(event.chat_id, watched[event.chat_id], msg,
-                                               content, dedup.offer_price(content)), [])
+                                               content, price), [])
                 return
 
             pending.append(PendingOffer(event.chat_id, watched[event.chat_id], msg,
-                                        content, dedup.offer_price(content)))
+                                        content, price, dedup.fingerprint(content)))
             log.info('CAPTURA | %s | msg=%s | palavras=%s', watched[event.chat_id],
                      msg.id, ', '.join(found))
             if flush_task is None or flush_task.done():
@@ -472,6 +519,9 @@ async def main() -> None:
                         '/preco RTX 5060 | 1800 - mudar o preco maximo (ou toque na frase em /lista)\n'
                         '/remover RTX 5060 - remover frase\n'
                         '/lista - listar frases\n'
+                        '/proibir usado, seminovo - ignorar anuncios com essas palavras\n'
+                        '/liberar usado - voltar a aceitar\n'
+                        '/proibidos - listar palavras proibidas\n'
                         '/grupos - listar seus grupos e canais\n'
                         '/monitorar -100123 -100456 - acompanhar varios de uma vez\n'
                         '/monitorar todos - acompanhar todos os seus grupos e canais\n'
@@ -513,6 +563,29 @@ async def main() -> None:
                     else:
                         answer = (f'Limite removido de "{phrase}".' if removing
                                   else f'Limite de "{phrase}": {format_brl(limit)}.')
+                elif cmd in ('/proibir', '/block'):
+                    if not arg:
+                        answer = ('Uso: /proibir usado\n'
+                                  'Ignora qualquer anuncio que contenha a palavra/frase, '
+                                  'mesmo que combine com uma palavra-chave. '
+                                  'Varias de uma vez: /proibir usado, seminovo, recondicionado')
+                    else:
+                        words = [w.strip() for w in re.split(r'[,;\n]+', arg) if w.strip()]
+                        added = [w for w in words if store.block_word(w)]
+                        answer = (f'Proibidas ({len(added)}): ' + ', '.join(added) if added
+                                  else 'Essas palavras ja estavam proibidas.')
+                elif cmd in ('/liberar', '/unblock'):
+                    if not arg:
+                        answer = 'Uso: /liberar usado'
+                    else:
+                        words = [w.strip() for w in re.split(r'[,;\n]+', arg) if w.strip()]
+                        freed = [w for w in words if store.unblock_word(w)]
+                        answer = (f'Liberadas ({len(freed)}): ' + ', '.join(freed) if freed
+                                  else 'Nenhuma dessas palavras estava proibida.')
+                elif cmd in ('/proibidos', '/blocked'):
+                    banned = store.blocked()
+                    answer = ('Palavras proibidas:\n' + '\n'.join('• ' + b for b in banned)
+                              if banned else 'Nenhuma palavra proibida. Use /proibir palavra.')
                 elif cmd in ('/remover', '/remove'):
                     answer = ('Palavra-chave removida.' if store.remove_keyword(arg)
                               else 'Palavra-chave nao encontrada.') if arg else 'Uso: /remover RTX 5060'
@@ -592,6 +665,7 @@ async def main() -> None:
                               f'Bot: @{bot.username}\n'
                               f'Canais monitorados: {len(watched)}\n'
                               f'Palavras-chave: {len(keywords)}\n'
+                              f'Palavras proibidas: {len(store.blocked())}\n'
                               f'Janela anti-duplicados: {dedup_window:g}s '
                               f'(semelhanca minima {dedup_similarity:.2f})\n'
                               f'Cabecalho de origem: {"sim" if show_source else "nao"}\n'
@@ -603,8 +677,12 @@ async def main() -> None:
                         limits = store.keyword_limits()
                         price = dedup.offer_price(arg)
                         found = matching_keywords(list(limits), arg, limits, price)
+                        banned = blocked_words(store.blocked(), arg)
                         answer = ('Correspondencia encontrada: ' + ', '.join(found)
                                   if found else 'Nenhuma palavra-chave corresponde a esse texto.')
+                        if banned:
+                            answer = ('Bloqueado por palavra proibida: ' + ', '.join(banned)
+                                      + '\n' + answer)
                         if price is not None:
                             answer += f'\nPreco identificado: R$ {price:.2f}'
                 elif cmd in ('/similar', '/comparar'):
